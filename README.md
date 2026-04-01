@@ -1,8 +1,9 @@
 # Tiny HTTP/1.1 Server + AFLGo Target
 
-This repository now contains two separate C++ programs:
+This repository now contains a real server, a standalone handler for that same server logic, and a separate intentionally crashy AFLGo target:
 
 - `server/`: a small real HTTP/1.1 server that listens on a TCP port.
+- `server/harness.cpp`: a standalone executor for the same parser/handler logic used by the real server.
 - `fuzz/`: a file-driven HTTP/1.1 request parser with many intentional, deterministic crash bugs for AFL/AFLGo testing.
 
 The `fuzz/` target is the primary AFLGo target. It is intentionally unsafe by design.
@@ -10,6 +11,9 @@ The `fuzz/` target is the primary AFLGo target. It is intentionally unsafe by de
 ## Layout
 
 - `server/main.cpp`: real socket-based HTTP/1.1 server.
+- `server/http_core.cpp`: shared request parser and route executor used by the server and harness.
+- `server/http_core.hpp`: shared server-core declarations.
+- `server/harness.cpp`: file-driven harness for the real server functionality.
 - `fuzz/main.cpp`: entrypoint that reads one request from a file.
 - `fuzz/http_target.cpp`: request parsing and route dispatch.
 - `fuzz/http_target.hpp`: shared request/handler declarations.
@@ -28,12 +32,14 @@ make
 This produces:
 
 - `build/mini_http_server`
+- `build/mini_http_handler`
 - `build/mini_http_fuzz`
 
 You can also build individually:
 
 ```bash
 make server
+make server-handler
 make fuzz
 ```
 
@@ -42,6 +48,8 @@ make fuzz
 ### Purpose
 
 `server/` is a tiny real HTTP/1.1 server. It is intentionally small and incomplete. It is meant to be understandable and easy to run, not production-safe.
+
+Its actual request parsing and execution logic lives in `server/http_core.cpp`. The socket server is just a thin network wrapper around that shared core.
 
 ### Expected behavior
 
@@ -99,6 +107,27 @@ The server does this for each connection:
 7. Close the socket.
 
 This design keeps the code small and deterministic.
+
+### Standalone Handler
+
+`server/harness.cpp` is the standalone entrypoint for the same functionality the real server uses. It reads one HTTP request from a file, calls the shared parser/handler, and prints the resulting HTTP response.
+
+That makes the real server logic handoff-able, separately testable, and fuzz-able without using sockets.
+
+Build it with:
+
+```bash
+make server-handler
+```
+
+Run it with:
+
+```bash
+./build/mini_http_handler server/seeds/get_root.txt
+./build/mini_http_handler server/seeds/post_echo.txt
+```
+
+This standalone handler is the right target if you want to fuzz the real server functionality itself rather than the intentionally separate `fuzz/` toy target.
 
 ## Fuzz Target
 
@@ -170,6 +199,8 @@ The local `aflgo/` checkout in this repository documents the standard instrument
 The bundled AFLGo tree is Linux-oriented. The intended place to run AFLGo is Linux or WSL, not native Windows PowerShell.
 
 The real `server/` target also uses POSIX sockets and is intended to be built and run on Linux or WSL.
+
+The standalone `server/harness.cpp` target does not use sockets and is the easiest way to apply AFLGo or regular AFL to the actual server parsing/handling code.
 
 ### Example target selection process
 
