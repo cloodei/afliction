@@ -3,15 +3,23 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 namespace mini_http {
+
+struct Header {
+  std::string name;
+  std::string value;
+};
 
 struct Request {
   std::string method;
   std::string path;
   std::string version;
   std::map<std::string, std::string> headers;
+  std::vector<Header> header_list;
   std::string body;
+  std::string query;
 };
 
 bool parse_request(const std::string &raw, Request &request, std::string &error);

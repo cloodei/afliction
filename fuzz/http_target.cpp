@@ -23,6 +23,14 @@ bool split_message(const std::string &input, std::string &header_blob, std::stri
     return true;
   }
 
+  const std::string mixed_marker = "\n\r\n";
+  pos = input.find(mixed_marker);
+  if (pos != std::string::npos) {
+    header_blob = input.substr(0, pos);
+    body = input.substr(pos + mixed_marker.size());
+    return true;
+  }
+
   return false;
 }
 

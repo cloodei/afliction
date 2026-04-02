@@ -1,19 +1,27 @@
-# Tiny HTTP/1.1 Server + AFLGo Target
+# AFLGo HTTP Target
 
-This repository now contains a real server, a standalone handler for that same server logic, and a separate intentionally crashy AFLGo target:
+This repository is primarily for testing AFLGo with a very small C++ HTTP/1.1-style request handler that contains many intentional deterministic crashes.
 
-- `server/`: a small real HTTP/1.1 server that listens on a TCP port.
-- `server/harness.cpp`: a standalone executor for the same parser/handler logic used by the real server.
-- `fuzz/`: a file-driven HTTP/1.1 request parser with many intentional, deterministic crash bugs for AFL/AFLGo testing.
+The main subject binary is:
 
-The `fuzz/` target is the primary AFLGo target. It is intentionally unsafe by design.
+- `build/mini_http_handler`
+
+That binary uses the real shared handler logic in:
+
+- `server/http_core.cpp`
+
+The optional socket server in `server/main.cpp` exists only as a thin wrapper around the same core. It is not the main focus.
+
+There is also a separate synthetic target under `fuzz/`, but the preferred AFLGo subject is the standalone handler built from `server/`.
 
 ## Layout
 
-- `server/main.cpp`: real socket-based HTTP/1.1 server.
-- `server/http_core.cpp`: shared request parser and route executor used by the server and harness.
-- `server/http_core.hpp`: shared server-core declarations.
-- `server/harness.cpp`: file-driven harness for the real server functionality.
+- `server/main.cpp`: optional socket wrapper around the shared handler.
+- `server/http_core.cpp`: primary AFLGo target logic with intentional crash sites.
+- `server/http_core.hpp`: shared declarations.
+- `server/harness.cpp`: standalone executable for fuzzing the shared handler.
+- `server/seeds/`: seed corpus for the primary AFLGo subject.
+- `server/targets/README.md`: notes on selecting target lines in `server/http_core.cpp`.
 - `fuzz/main.cpp`: entrypoint that reads one request from a file.
 - `fuzz/http_target.cpp`: request parsing and route dispatch.
 - `fuzz/http_target.hpp`: shared request/handler declarations.
@@ -31,8 +39,8 @@ make
 
 This produces:
 
-- `build/mini_http_server`
 - `build/mini_http_handler`
+- `build/mini_http_server`
 - `build/mini_http_fuzz`
 
 You can also build individually:
@@ -43,76 +51,11 @@ make server-handler
 make fuzz
 ```
 
-## Real Server
+## Primary Target
 
-### Purpose
+`server/harness.cpp` is the main AFLGo entrypoint. It reads one HTTP request from a file, calls the shared parser/handler in `server/http_core.cpp`, and prints an HTTP-like response unless one of the intentional bug paths crashes first.
 
-`server/` is a tiny real HTTP/1.1 server. It is intentionally small and incomplete. It is meant to be understandable and easy to run, not production-safe.
-
-Its actual request parsing and execution logic lives in `server/http_core.cpp`. The socket server is just a thin network wrapper around that shared core.
-
-### Expected behavior
-
-It accepts one connection per threadless loop iteration and handles a single request per connection.
-
-Supported behavior:
-
-- Parses a request line in the form `METHOD PATH HTTP/1.1`
-- Parses headers until `\r\n\r\n`
-- Supports `GET` and `POST`
-- Reads the body when `Content-Length` is present
-- Requires `Host` for valid `HTTP/1.1`
-- Returns simple text responses
-
-Routes:
-
-- `GET /`: returns a short banner
-- `GET /health`: returns `ok`
-- `POST /echo`: echoes the request body
-- anything else: returns `404`
-
-Known simplifications:
-
-- no TLS
-- no keep-alive reuse
-- no chunked decoding
-- no pipelining
-- no persistent worker model
-- no filesystem serving
-
-### Run
-
-```bash
-./build/mini_http_server 8080
-```
-
-Then test it with:
-
-```bash
-curl -i http://127.0.0.1:8080/
-curl -i http://127.0.0.1:8080/health
-curl -i -X POST http://127.0.0.1:8080/echo -d 'hello'
-```
-
-### How it should work internally
-
-The server does this for each connection:
-
-1. `accept()` a client.
-2. Read from the socket into a string buffer.
-3. Stop once headers are complete and the full `Content-Length` body is available.
-4. Parse the request line and headers.
-5. Route based on method and path.
-6. Write one HTTP/1.1 response.
-7. Close the socket.
-
-This design keeps the code small and deterministic.
-
-### Standalone Handler
-
-`server/harness.cpp` is the standalone entrypoint for the same functionality the real server uses. It reads one HTTP request from a file, calls the shared parser/handler, and prints the resulting HTTP response.
-
-That makes the real server logic handoff-able, separately testable, and fuzz-able without using sockets.
+This is the target to hand off, compile separately, and fuzz.
 
 Build it with:
 
@@ -127,13 +70,48 @@ Run it with:
 ./build/mini_http_handler server/seeds/post_echo.txt
 ```
 
-This standalone handler is the right target if you want to fuzz the real server functionality itself rather than the intentionally separate `fuzz/` toy target.
+The parser accepts both `CRLF` and plain `LF` line endings.
+
+### What it parses
+
+- request line: `METHOD SP PATH SP HTTP/1.1`
+- headers
+- optional body from `Content-Length`
+- simple route dispatch based on path and a few headers
+
+### Why this target is AFLGo-friendly
+
+- file-driven and deterministic
+- small control-flow graph
+- stable target lines in one file: `server/http_core.cpp`
+- multiple shallow and deep crash sites behind parser and dispatcher decisions
+- no socket setup required for fuzzing
+
+### Intentional crash paths
+
+The shared handler contains deterministic crash sinks behind combinations of:
+
+- path
+- method
+- `Authorization`
+- duplicate `Host`
+- `Content-Length`
+- `Transfer-Encoding`
+- `X-Debug`
+- query markers
+- body magic bytes
+
+The actual crash lines live directly in `server/http_core.cpp`, which is the file AFLGo should target.
+
+See:
+
+- `server/targets/README.md`
 
 ## Fuzz Target
 
 ### Purpose
 
-`fuzz/` is the target that should be used for AFLGo. It is deliberately engineered to contain many reachable crashing bugs behind small HTTP-parsing and routing decisions.
+`fuzz/` is an extra synthetic target with similar ideas. It is no longer the preferred subject.
 
 It does not open sockets. It reads a single input file and interprets it as one HTTP/1.1 request.
 
@@ -186,31 +164,31 @@ The crashes are deterministic and chosen to be easy for AFL/AFLGo to detect.
 
 ## AFLGo Workflow
 
-The local `aflgo/` checkout in this repository documents the standard instrumentation flow. The short version for this target is:
+The local `aflgo/` checkout in this repository documents the standard instrumentation flow. The short version for the preferred target is:
 
-1. Build `fuzz/` once with AFLGo target extraction flags.
+1. Build `server/` once with AFLGo target extraction flags.
 2. Generate `BBnames.txt` and `BBcalls.txt` into a temporary directory.
 3. Compute `distance.cfg.txt` for selected target lines.
 4. Rebuild `fuzz/` with `-distance=...`.
-5. Run `afl-fuzz` against `build/mini_http_fuzz @@`.
+5. Run `afl-fuzz` against `build/mini_http_handler @@`.
 
 ### Important environment note
 
 The bundled AFLGo tree is Linux-oriented. The intended place to run AFLGo is Linux or WSL, not native Windows PowerShell.
 
-The real `server/` target also uses POSIX sockets and is intended to be built and run on Linux or WSL.
+The optional socket wrapper in `server/main.cpp` uses POSIX sockets and is intended for Linux or WSL.
 
-The standalone `server/harness.cpp` target does not use sockets and is the easiest way to apply AFLGo or regular AFL to the actual server parsing/handling code.
+The standalone `server/harness.cpp` target does not use sockets and is the easiest way to apply AFLGo or regular AFL to the actual handler code.
 
 ### Example target selection process
 
-Pick one or more crash lines in `fuzz/bugs.cpp` and write them into `BBtargets.txt` as:
+Pick one or more crash lines in `server/http_core.cpp` and write them into `BBtargets.txt` as:
 
 ```text
-fuzz/bugs.cpp:LINE_NUMBER
+server/http_core.cpp:LINE_NUMBER
 ```
 
-Then follow the AFLGo flow from `aflgo/Readme.md` using `build/mini_http_fuzz` as the subject binary.
+Then follow the AFLGo flow from `aflgo/Readme.md` using `build/mini_http_handler` as the subject binary.
 
 ### Example Linux build for target extraction
 
@@ -226,7 +204,7 @@ export CXX=$AFLGO/instrument/aflgo-clang++
 export ADDITIONAL="-targets=$TMP_DIR/BBtargets.txt -outdir=$TMP_DIR -flto -fuse-ld=gold -Wl,-plugin-opt=save-temps"
 
 make clean
-make fuzz CXXFLAGS="-std=c++17 -O0 -g $ADDITIONAL"
+make server-handler CXXFLAGS="-std=c++17 -O0 -g $ADDITIONAL"
 ```
 
 After the first build, clean up `BBnames.txt` and `BBcalls.txt` as described in `aflgo/Readme.md`, compute distances, then rebuild with `-distance=$TMP_DIR/distance.cfg.txt`.
@@ -235,9 +213,9 @@ After the first build, clean up `BBnames.txt` and `BBcalls.txt` as described in 
 
 ```bash
 mkdir -p out
-$AFLGO/afl-2.57b/afl-fuzz -m none -z exp -c 45m -i fuzz/seeds -o out ./build/mini_http_fuzz @@
+$AFLGO/afl-2.57b/afl-fuzz -m none -z exp -c 45m -i server/seeds -o out ./build/mini_http_handler @@
 ```
 
 ## Safety Note
 
-The fuzz target is intentionally vulnerable and crashy. Do not expose it as a network service.
+The standalone handler and synthetic fuzz target are intentionally vulnerable and crashy. Do not expose them as network services.
